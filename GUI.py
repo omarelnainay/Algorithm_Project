@@ -5,6 +5,7 @@ import time
 from typing import Dict, Tuple, List 
 from data_loader import load_data
 from algorithms import dijkstra_shortest_path, kruskal_mst, a_star_emergency_routing, dynamic_programming_bus_scheduling, dp_road_maintenance_allocation, greedy_traffic_signal_optimization
+from ML_Model import predict_traffic
 
 class TransportationGUI:
     """Enhanced GUI with manual layout for clearer visualization."""
@@ -147,6 +148,7 @@ class TransportationGUI:
         self.setup_emergency_tab(notebook)
         self.setup_transit_tab(notebook)
         self.setup_maintenance_tab(notebook)
+        self.setup_prediction_tab(notebook)
         
         # Right panel - Canvas
         canvas_frame = tk.Frame(main_frame, bg='#0f3460')
@@ -405,6 +407,82 @@ and high-population areas."""
         self.maint_result_text = tk.Text(frame, height=8, bg='#1a1a2e', fg='#FF9800',
                                          font=('Consolas', 9), wrap=tk.WORD)
         self.maint_result_text.pack(fill=tk.X, padx=10, pady=5)
+    
+    def setup_prediction_tab(self, notebook):
+        """Setup ML prediction tab."""
+        frame = tk.Frame(notebook, bg='#16213e')
+        notebook.add(frame, text="🤖 ML Prediction")
+        
+        tk.Label(frame, text="Traffic Congestion Prediction", font=('Helvetica', 11, 'bold'),
+                bg='#16213e', fg='#9C27B0').pack(pady=5)
+        
+        tk.Label(frame, text="Predict traffic congestion using\nmachine learning model", 
+                bg='#16213e', fg='#ccc', justify=tk.CENTER).pack(pady=2)
+        
+        # Input fields
+        input_frame = tk.Frame(frame, bg='#16213e')
+        input_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Road ID
+        tk.Label(input_frame, text="Road ID:", bg='#16213e', fg='white').grid(row=0, column=0, sticky='w', pady=2)
+        self.pred_road_var = tk.StringVar(value="Maadi-Downtown Road")
+        road_combo = ttk.Combobox(input_frame, textvariable=self.pred_road_var, width=20)
+        road_combo['values'] = [
+            "Maadi-Downtown Road",
+            "Maadi-Giza Road", 
+            "Nasr City-Downtown Road",
+            "Nasr City-Heliopolis Road",
+            "Downtown-Heliopolis Road",
+            "Downtown-Zamalek Road",
+            "Downtown-Mohandessin Road",
+            "Downtown-Dokki Road"
+        ]
+        road_combo.grid(row=0, column=1, pady=2, padx=(5,0))
+        
+        # Time of Day
+        tk.Label(input_frame, text="Time of Day:", bg='#16213e', fg='white').grid(row=1, column=0, sticky='w', pady=2)
+        self.pred_time_var = tk.StringVar(value="Morning")
+        time_combo = ttk.Combobox(input_frame, textvariable=self.pred_time_var, width=15)
+        time_combo['values'] = ["Morning", "Afternoon", "Evening", "Night"]
+        time_combo.grid(row=1, column=1, pady=2, padx=(5,0))
+        
+        # Capacity
+        tk.Label(input_frame, text="Capacity:", bg='#16213e', fg='white').grid(row=2, column=0, sticky='w', pady=2)
+        self.pred_capacity_var = tk.IntVar(value=3000)
+        capacity_entry = tk.Entry(input_frame, textvariable=self.pred_capacity_var, width=17, bg='#0f3460', fg='white')
+        capacity_entry.grid(row=2, column=1, pady=2, padx=(5,0))
+        
+        # Volume
+        tk.Label(input_frame, text="Volume:", bg='#16213e', fg='white').grid(row=3, column=0, sticky='w', pady=2)
+        self.pred_volume_var = tk.IntVar(value=1500)
+        volume_entry = tk.Entry(input_frame, textvariable=self.pred_volume_var, width=17, bg='#0f3460', fg='white')
+        volume_entry.grid(row=3, column=1, pady=2, padx=(5,0))
+        
+        # Buttons
+        btn_frame = tk.Frame(frame, bg='#16213e')
+        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        tk.Button(btn_frame, text="🔮 Predict Congestion", command=self.predict_congestion,
+                 bg='#9C27B0', fg='white', font=('Helvetica', 10, 'bold'),
+                 padx=15, pady=5).pack(side=tk.LEFT, padx=2)
+        
+        tk.Button(btn_frame, text="🔄 Reset", command=self.reset_prediction_inputs,
+                 bg='#FF9800', fg='white', font=('Helvetica', 10),
+                 padx=15, pady=5).pack(side=tk.LEFT, padx=2)
+        
+        # Results
+        self.pred_result_text = tk.Text(frame, height=8, bg='#1a1a2e', fg='#9C27B0',
+                                        font=('Consolas', 9), wrap=tk.WORD)
+        self.pred_result_text.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Info
+        info_text = """ℹ️ Model Info:
+• Random Forest Regressor
+• Trained on historical traffic data
+• Predicts congestion level (0-5 scale)
+• Lower values = better traffic flow"""
+        tk.Label(frame, text=info_text, bg='#16213e', fg='#aaa', 
+                justify=tk.LEFT, font=('Helvetica', 8)).pack(pady=5, anchor='w', padx=10)
     
     def run_emergency_scenario(self, from_id, to_id):
         """Run a predefined emergency scenario."""
@@ -864,6 +942,92 @@ and high-population areas."""
                                    text=label, fill='white',
                                    font=('Arial', 7), anchor=tk.W)
             y_offset += 20
+    
+    def predict_congestion(self):
+        """Predict traffic congestion using ML model."""
+        road_id = self.pred_road_var.get()
+        time_of_day = self.pred_time_var.get()
+        capacity = self.pred_capacity_var.get()
+        volume = self.pred_volume_var.get()
+        
+        self.pred_result_text.delete(1.0, tk.END)
+        
+        # Validate inputs
+        if not road_id or not time_of_day:
+            self.pred_result_text.insert(1.0, "⚠️ Please fill in all fields!")
+            return
+        
+        try:
+            capacity = int(capacity)
+            volume = int(volume)
+        except ValueError:
+            self.pred_result_text.insert(1.0, "⚠️ Capacity and Volume must be numbers!")
+            return
+        
+        # Make prediction
+        try:
+            prediction = predict_traffic(road_id, time_of_day, capacity, volume)
+            
+            if prediction is not None:
+                # Interpret prediction level
+                if prediction < 1.0:
+                    level = "Excellent Flow"
+                    color = "🟢"
+                    desc = "Very light traffic, smooth flow"
+                elif prediction < 2.0:
+                    level = "Good Flow"
+                    color = "🟡"
+                    desc = "Light traffic, minor delays"
+                elif prediction < 3.0:
+                    level = "Moderate Congestion"
+                    color = "🟠"
+                    desc = "Moderate traffic, some delays"
+                elif prediction < 4.0:
+                    level = "Heavy Congestion"
+                    color = "🔴"
+                    desc = "Heavy traffic, significant delays"
+                else:
+                    level = "Severe Congestion"
+                    color = "🚫"
+                    desc = "Very heavy traffic, major delays"
+                
+                result = f"🔮 PREDICTION RESULT\n\n"
+                result += f"📍 Road: {road_id}\n"
+                result += f"🕐 Time: {time_of_day}\n"
+                result += f"🚗 Capacity: {capacity:,}\n"
+                result += f"📊 Volume: {volume:,}\n\n"
+                result += f"🎯 Congestion Level: {prediction:.3f}\n"
+                result += f"📈 Traffic Status: {color} {level}\n"
+                result += f"ℹ️ Description: {desc}\n\n"
+                result += f"💡 Recommendation:\n"
+                
+                if prediction < 2.0:
+                    result += "   ✅ Traffic flow is good - no action needed"
+                elif prediction < 3.0:
+                    result += "   ⚠️ Consider traffic management measures"
+                else:
+                    result += "   🚨 High congestion - implement traffic controls"
+                
+                self.pred_result_text.insert(1.0, result)
+                self.log_info(f"ML Prediction: {road_id} {time_of_day} → {prediction:.3f} ({level})", 'success')
+                self.status_var.set(f"Prediction: {road_id} | Congestion: {prediction:.3f} | Status: {level}")
+            else:
+                self.pred_result_text.insert(1.0, "❌ Prediction failed!\n\nCheck if model files exist and inputs are valid.")
+                self.log_info("ML prediction failed", 'error')
+                
+        except Exception as e:
+            self.pred_result_text.insert(1.0, f"❌ Error during prediction:\n\n{str(e)}")
+            self.log_info(f"ML prediction error: {str(e)}", 'error')
+    
+    def reset_prediction_inputs(self):
+        """Reset prediction input fields to defaults."""
+        self.pred_road_var.set("Maadi-Downtown Road")
+        self.pred_time_var.set("Morning")
+        self.pred_capacity_var.set(3000)
+        self.pred_volume_var.set(1500)
+        self.pred_result_text.delete(1.0, tk.END)
+        self.pred_result_text.insert(1.0, "Inputs reset to defaults")
+        self.log_info("Prediction inputs reset", 'info')
     
     def run(self):
         """Start the application."""
