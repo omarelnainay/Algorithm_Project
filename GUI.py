@@ -42,7 +42,15 @@ class TransportationGUI:
         self.selected_path = []
         self.mst_edges = []
         self.emergency_path = []
-        
+
+        # Zoom & pan state (applied in get_canvas_pos)
+        self.zoom = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+        self.min_zoom = 0.3
+        self.max_zoom = 5.0
+        self._pan_anchor = None
+
         self.setup_ui()
     
     def calculate_layout(self) -> Dict[str, Tuple[float, float]]:
@@ -95,26 +103,38 @@ class TransportationGUI:
         return positions
     
     def get_canvas_pos(self, node_id: str) -> Tuple[float, float]:
-        """Get canvas position with margin offset."""
+        """Get canvas position with margin offset, then apply zoom/pan transform."""
         canvas_w = max(self.canvas.winfo_width(), 1000)
         canvas_h = max(self.canvas.winfo_height(), 700)
-        
+
         margin_x = 60
         margin_y = 50
-        
+
         if node_id not in self.node_positions:
-            return (canvas_w // 2, canvas_h // 2)
-        
-        x_pct, y_pct = self.node_positions[node_id]
-        
-        # Convert percentages to canvas coordinates
-        avail_w = canvas_w - 2 * margin_x
-        avail_h = canvas_h - 2 * margin_y
-        
-        x = margin_x + (x_pct / 100.0) * avail_w
-        y = margin_y + (y_pct / 100.0) * avail_h
-        
+            bx, by = canvas_w / 2.0, canvas_h / 2.0
+        else:
+            x_pct, y_pct = self.node_positions[node_id]
+
+            # Convert percentages to canvas coordinates (world space)
+            avail_w = canvas_w - 2 * margin_x
+            avail_h = canvas_h - 2 * margin_y
+
+            bx = margin_x + (x_pct / 100.0) * avail_w
+            by = margin_y + (y_pct / 100.0) * avail_h
+
+        # World -> screen transform
+        x = bx * self.zoom + self.pan_x
+        y = by * self.zoom + self.pan_y
         return (x, y)
+
+    def _scale(self, base, lo=1, hi=80):
+        """Scale a pixel size by current zoom, clamped to [lo, hi]."""
+        v = int(round(base * self.zoom))
+        if v < lo:
+            v = lo
+        if v > hi:
+            v = hi
+        return v
     
     def setup_ui(self):
         """Setup the user interface."""
@@ -179,7 +199,30 @@ class TransportationGUI:
         # Bind canvas events
         self.canvas.bind("<Configure>", lambda e: self.draw_network())
         self.canvas.bind("<Button-1>", self.on_canvas_click)
-        
+
+        # Zoom: mouse wheel on Windows / macOS
+        self.canvas.bind("<MouseWheel>", self.on_zoom)
+        # Zoom: mouse wheel on Linux uses Button-4 / Button-5
+        self.canvas.bind("<Button-4>", lambda e: self._zoom_step(1, e))
+        self.canvas.bind("<Button-5>", lambda e: self._zoom_step(-1, e))
+
+        # Pan: right-button drag (and middle-button as an alternative)
+        self.canvas.bind("<ButtonPress-3>", self.on_pan_start)
+        self.canvas.bind("<B3-Motion>", self.on_pan_drag)
+        self.canvas.bind("<ButtonRelease-3>", self.on_pan_end)
+        self.canvas.bind("<ButtonPress-2>", self.on_pan_start)
+        self.canvas.bind("<B2-Motion>", self.on_pan_drag)
+        self.canvas.bind("<ButtonRelease-2>", self.on_pan_end)
+
+        # Keyboard shortcuts: r/0 reset, +/- zoom, arrows pan
+        self.root.bind("<KeyPress-r>", lambda e: self.reset_view())
+        self.root.bind("<KeyPress-R>", lambda e: self.reset_view())
+        self.root.bind("<KeyPress-0>", lambda e: self.reset_view())
+        self.root.bind("<plus>", lambda e: self._zoom_step(1, self._canvas_center_event()))
+        self.root.bind("<KP_Add>", lambda e: self._zoom_step(1, self._canvas_center_event()))
+        self.root.bind("<minus>", lambda e: self._zoom_step(-1, self._canvas_center_event()))
+        self.root.bind("<KP_Subtract>", lambda e: self._zoom_step(-1, self._canvas_center_event()))
+
         # Initial draw
         self.draw_network()
         self.log_info("System initialized successfully", 'success')
@@ -659,15 +702,70 @@ and high-population areas."""
         self.info_text.insert(tk.END, f"{text}\n", tag)
         self.info_text.see(tk.END)
     
+    def on_zoom(self, event):
+        """Mouse-wheel zoom (Windows / macOS) anchored at the cursor."""
+        direction = 1 if event.delta > 0 else -1
+        self._zoom_step(direction, event)
+
+    def _zoom_step(self, direction, event):
+        """Zoom in (direction>0) or out (direction<0), keeping the cursor anchored."""
+        factor = 1.15 if direction > 0 else 1 / 1.15
+        new_zoom = max(self.min_zoom, min(self.max_zoom, self.zoom * factor))
+        if abs(new_zoom - self.zoom) < 1e-6:
+            return
+        actual_factor = new_zoom / self.zoom
+        # Keep the world point under the cursor fixed in screen coordinates
+        self.pan_x = event.x - actual_factor * (event.x - self.pan_x)
+        self.pan_y = event.y - actual_factor * (event.y - self.pan_y)
+        self.zoom = new_zoom
+        self.draw_network()
+
+    def _canvas_center_event(self):
+        """Build a minimal event-like object centered on the canvas (for keyboard zoom)."""
+        class _E:
+            pass
+        e = _E()
+        e.x = max(self.canvas.winfo_width(), 1) // 2
+        e.y = max(self.canvas.winfo_height(), 1) // 2
+        return e
+
+    def on_pan_start(self, event):
+        """Begin a pan drag."""
+        self._pan_anchor = (event.x, event.y, self.pan_x, self.pan_y)
+        self.canvas.configure(cursor='fleur')
+
+    def on_pan_drag(self, event):
+        """Drag to pan the diagram."""
+        if not self._pan_anchor:
+            return
+        sx, sy, ox, oy = self._pan_anchor
+        self.pan_x = ox + (event.x - sx)
+        self.pan_y = oy + (event.y - sy)
+        self.draw_network()
+
+    def on_pan_end(self, event):
+        """Finish a pan drag."""
+        self._pan_anchor = None
+        self.canvas.configure(cursor='')
+
+    def reset_view(self):
+        """Reset zoom and pan to the default view."""
+        self.zoom = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+        self.draw_network()
+
     def on_canvas_click(self, event):
         """Handle canvas clicks for node selection."""
         min_dist = float('inf')
         closest_node = None
-        
+        # Hit-test radius scales with zoom so it tracks the visible node size
+        click_radius = max(15.0, 35.0 * self.zoom)
+
         for node_id in self.graph.nodes:
             x, y = self.get_canvas_pos(node_id)
             dist = math.sqrt((event.x - x)**2 + (event.y - y)**2)
-            if dist < min_dist and dist < 35:
+            if dist < min_dist and dist < click_radius:
                 min_dist = dist
                 closest_node = node_id
         
@@ -728,23 +826,23 @@ and high-population areas."""
             
             if is_highlighted and self.selected_path:
                 color = '#4CAF50'
-                width = 5
+                width = self._scale(5, lo=2, hi=14)
                 dash = None
             elif is_highlighted and self.emergency_path:
                 color = '#FF1744'
-                width = 5
+                width = self._scale(5, lo=2, hi=14)
                 dash = (10, 5)
             elif is_highlighted and self.mst_edges:
                 color = '#FF9800'
-                width = 4
+                width = self._scale(4, lo=2, hi=12)
                 dash = None
             elif edge.is_new:
                 color = '#444466'
-                width = 1
+                width = self._scale(1, lo=1, hi=3)
                 dash = (5, 5)
             else:
                 color = '#2a2a4a'
-                width = 2
+                width = self._scale(2, lo=1, hi=6)
                 dash = None
             
             self.canvas.create_line(from_pos[0], from_pos[1], to_pos[0], to_pos[1],
@@ -767,8 +865,8 @@ and high-population areas."""
         for node_id, node in self.graph.nodes.items():
             x, y = self.get_canvas_pos(node_id)
             color = self.type_colors.get(node.type, '#607D8B')
-            
-            # Node size
+
+            # Node size (base) — scaled with current zoom and clamped
             base_radius = 12
             if node.type in ['Medical', 'Government', 'Airport']:
                 base_radius = 16
@@ -776,52 +874,57 @@ and high-population areas."""
                 base_radius = 15
             elif node.population > 200000:
                 base_radius = 13
-            
+            radius = self._scale(base_radius, lo=4, hi=40)
+
             is_in_path = node_id in (self.selected_path or self.emergency_path or [])
             is_start = ((self.selected_path and node_id == self.selected_path[0]) or 
                        (self.emergency_path and node_id == self.emergency_path[0]))
             is_end = ((self.selected_path and node_id == self.selected_path[-1]) or 
                      (self.emergency_path and node_id == self.emergency_path[-1]))
-            
+
             # Glow for path nodes
             if is_in_path:
-                self.canvas.create_oval(x - base_radius - 5, y - base_radius - 5,
-                                       x + base_radius + 5, y + base_radius + 5,
+                glow = max(2, int(5 * self.zoom))
+                self.canvas.create_oval(x - radius - glow, y - radius - glow,
+                                       x + radius + glow, y + radius + glow,
                                        fill='', outline='white', width=2)
-            
+
             # Main node
             outline_color = 'white' if is_in_path else '#333'
             outline_width = 3 if is_in_path else 1
-            
-            self.canvas.create_oval(x - base_radius, y - base_radius,
-                                   x + base_radius, y + base_radius,
+
+            self.canvas.create_oval(x - radius, y - radius,
+                                   x + radius, y + radius,
                                    fill=color, outline=outline_color, width=outline_width)
-            
+
             # Start/End indicators
             if is_start:
-                self.canvas.create_text(x, y - base_radius - 18, text="▼ START",
+                self.canvas.create_text(x, y - radius - 18, text="▼ START",
                                        fill='#4CAF50', font=('Arial', 9, 'bold'))
             if is_end:
-                self.canvas.create_text(x, y + base_radius + 18, text="▲ END",
+                self.canvas.create_text(x, y + radius + 18, text="▲ END",
                                        fill='#f44336', font=('Arial', 9, 'bold'))
-            
+
             # Node name
             name = node.name[:18] + ".." if len(node.name) > 18 else node.name
-            self.canvas.create_text(x, y - base_radius - 20, text=name, fill='white',
+            self.canvas.create_text(x, y - radius - 12, text=name, fill='white',
                                    font=('Arial', 8, 'bold'))
-            
+
             # Node ID
-            self.canvas.create_text(x, y + base_radius + 14, text=f"({node_id})",
+            self.canvas.create_text(x, y + radius + 10, text=f"({node_id})",
                                    fill='#888', font=('Arial', 7))
-            
+
             # Population for large nodes
             if node.population > 200000:
                 pop_text = f"{node.population//1000}K"
-                self.canvas.create_text(x + base_radius + 20, y, text=pop_text,
+                self.canvas.create_text(x + radius + 14, y, text=pop_text,
                                        fill='#FFD700', font=('Arial', 7))
         
         # Draw legend
         self.draw_legend(canvas_w, canvas_h)
+
+        # Zoom + controls hint (screen-space, unaffected by pan/zoom)
+        self.draw_view_hud(canvas_w, canvas_h)
     
     def draw_legend(self, canvas_w, canvas_h):
         """Draw legend in corner."""
@@ -865,6 +968,28 @@ and high-population areas."""
                                    font=('Arial', 7), anchor=tk.W)
             y_offset += 20
     
+    def draw_view_hud(self, canvas_w, canvas_h):
+        """Show zoom level and a small controls hint in the top-right corner."""
+        pad = 10
+        box_w = 230
+        box_h = 78
+        x0 = canvas_w - box_w - pad
+        y0 = pad + 45  # leave room for the title
+
+        self.canvas.create_rectangle(x0, y0, x0 + box_w, y0 + box_h,
+                                     fill='#16213e', outline='#333')
+
+        self.canvas.create_text(x0 + 10, y0 + 14,
+                                text=f"Zoom: {self.zoom * 100:.0f}%",
+                                fill='#e94560', font=('Helvetica', 9, 'bold'),
+                                anchor=tk.W)
+
+        hint = ("Wheel: zoom    Right-drag: pan\n"
+                "+ / -: zoom    R or 0: reset")
+        self.canvas.create_text(x0 + 10, y0 + 32, text=hint,
+                                fill='#cccccc', font=('Arial', 8),
+                                anchor='nw')
+
     def run(self):
         """Start the application."""
         self.root.mainloop()
