@@ -37,18 +37,25 @@ The system ships with a Tkinter GUI that visualizes the network on a custom canv
 | Dynamic Programming | **Bus Scheduling DP** | Allocate a limited fleet across a route to maximize population coverage. | O(n · k) |
 | Dynamic Programming | **Road Maintenance (0/1 Knapsack)** | Pick repairs that maximize benefit under a fixed budget. | O(n · budget) |
 | Greedy | **Traffic Signal Optimization** | Distribute green‑time at an intersection proportional to flow × population. | O(d log d) |
+| Machine Learning | **Random Forest Regressor** | Forecast a congestion factor `C` from `(RoadID, TimeOfDay, Capacity, Volume)`. | Training: O(n · log n · trees) |
 
-All implementations live in `algorithms.py` and operate on the shared graph defined in `models.py`.
+The first six implementations live in `algorithms.py` and operate on the shared graph defined in `models.py`. The ML forecaster lives in `ML_Model.py` and is trained on `augmented_traffic_data.csv`.
 
 ## Project Structure
 
 ```text
 Algorithm_Project/
-├── main.py           # Entry point — launches the GUI
-├── GUI.py            # Tkinter UI, canvas visualization, and tab logic
-├── algorithms.py     # Kruskal, Dijkstra, A*, DP, and greedy implementations
-├── models.py         # Node, Edge, and TransportationGraph classes
-├── data_loader.py    # Loads the Cairo dataset into the graph
+├── main.py                       # Entry point — launches the GUI
+├── GUI.py                        # Tkinter UI, canvas visualization, and tab logic
+├── algorithms.py                 # Kruskal, Dijkstra, A*, DP, and greedy implementations
+├── models.py                     # Node, Edge, and TransportationGraph classes
+├── data_loader.py                # Loads the Cairo dataset into the graph
+├── ML_Model.py                   # Random Forest traffic-congestion forecaster
+├── augmented_traffic_data.csv    # Training set (RoadID, TimeOfDay, Capacity, Volume, C)
+├── traffic_model.pkl             # Trained model (joblib)
+├── road_encoder.pkl              # LabelEncoder for RoadID
+├── time_encoder.pkl              # LabelEncoder for TimeOfDay
+├── requirements.txt              # ML dependencies (sklearn, joblib, pandas, numpy)
 └── README.md
 ```
 
@@ -68,16 +75,29 @@ The dataset is hard‑coded in `data_loader.py` and includes:
 - Python **3.8+**
 - Tkinter (bundled with the standard CPython installer on Windows/macOS; on Debian/Ubuntu install with `sudo apt install python3-tk`)
 
-The project uses **only the Python standard library** (`tkinter`, `heapq`, `math`, `collections`, `typing`, `time`) — no third‑party packages are required.
+The core GUI app (route planning, MST, A*, DP optimizers, metro display, etc.) uses **only the Python standard library**. The optional **ML Traffic Forecast** feature in the Route tab additionally needs `scikit-learn`, `joblib`, `pandas`, and `numpy` — these are listed in `requirements.txt`.
 
 ## Installation
 
 ```bash
 git clone <your-repo-url>
 cd Algorithm_Project
+
+# Optional — only needed if you want the ML traffic forecast feature
+pip install -r requirements.txt
 ```
 
-No `pip install` step is needed.
+If you skip the `pip install`, the app still runs; the "🔮 Predict Route Congestion" button will simply report that the ML model is unavailable.
+
+### Re‑training the model (optional)
+
+The repo ships pre‑trained `traffic_model.pkl`, `road_encoder.pkl`, and `time_encoder.pkl`. To regenerate them from `augmented_traffic_data.csv`:
+
+```bash
+python ML_Model.py
+```
+
+This reports MSE / R² on a held‑out 20% test split and overwrites the three `.pkl` files.
 
 ## Usage
 
@@ -91,13 +111,33 @@ The main window (`1600x900`) opens with the Cairo network rendered on the right 
 
 ## GUI Tabs Overview
 
-- **Route Planning** — Pick a start node, an end node, and a time period; runs Dijkstra and highlights the resulting path with travel time and distance.
-- **Network Design** — Runs Kruskal's MST with toggles for *prioritize critical facilities* and *include new road proposals*; displays the selected MST edges and total cost.
+- **Route** — Pick a start node, an end node, and a time period; runs Dijkstra (or A*) and highlights the resulting path with travel time and distance. Includes a **🧠 ML Traffic Forecast** subsection that uses the Random Forest in `ML_Model.py` to predict a congestion factor for each segment of the current route that has training data.
+- **Network** — Runs Kruskal's MST with toggles for *prioritize critical facilities* and *include new road proposals*; displays the selected MST edges and total cost.
 - **Emergency** — Runs A\* between any node and the nearest medical facility (or a chosen destination) with quick‑scenario buttons.
-- **Transit** — Runs the bus scheduling DP for a chosen route and number of available buses, reporting maximum population coverage.
+- **Transit** — Runs the bus scheduling DP for a chosen route and number of available buses, reporting maximum population coverage. Also lets you visualize any of the three metro lines (M1/M2/M3) on the canvas, and run greedy traffic‑signal optimization for an intersection.
 - **Maintenance** — Runs the 0/1 knapsack DP given a budget and lists the roads selected for repair along with total cost and benefit.
 
 Each tab also shows a textual summary of the result alongside the canvas highlights.
+
+## ML Model Details
+
+`ML_Model.py` trains a `RandomForestRegressor` with 100 estimators on a **merged training set**:
+
+1. **`augmented_traffic_data.csv`** — 32 hand‑labeled rows for 8 central‑Cairo road segments × 4 time periods (real‑world ground truth).
+2. **Synthetic rows** auto‑generated from every other graph edge so the model can predict for any route in the network. Volume is reverse‑derived from each edge's stored `traffic_pattern`, and the synthetic congestion target follows a simple linear rule fit on the hand‑labeled data: `C ≈ clamp(0.5 + 4 · (volume / capacity), 0.5, 3.5)`.
+
+When a road appears in both sources, the hand‑labeled row wins (its `C` is real, not derived). Total training set: **184 rows across 46 roads**.
+
+Inputs to the Random Forest are `(RoadID, TimeOfDay, Capacity, Volume)` after label‑encoding the categorical fields; the target `C` is a real‑valued congestion factor in roughly the [0.5, 3.5] range.
+
+At runtime the GUI:
+
+1. Lazily loads the three `.pkl` artifacts the first time a prediction is requested (cached via `lru_cache`).
+2. Maps the current graph edge to its RoadID via `_build_edge_road_map()` in `ML_Model.py` — uses the friendly CSV name for the 8 hand‑labeled roads, derives `"<Node A>-<Node B> Road"` for everything else.
+3. Approximates `Volume` from the edge's stored `traffic_pattern` ratio so the prediction matches the training distribution.
+4. Categorizes the predicted `C` into Light / Moderate / Heavy / Severe for the result text.
+
+Click **🔄 Retrain Model** in the Route tab (or run `python ML_Model.py`) to regenerate the artifacts after editing the graph or the CSV.
 
 ## Notes
 

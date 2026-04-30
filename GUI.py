@@ -2,9 +2,44 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import math
 import time
+import threading
 from typing import Dict, Tuple, List 
 from data_loader import load_data
 from algorithms import dijkstra_shortest_path, kruskal_mst, a_star_emergency_routing, dynamic_programming_bus_scheduling, dp_road_maintenance_allocation, greedy_traffic_signal_optimization
+
+# Optional ML traffic forecaster — if joblib/sklearn aren't installed the GUI
+# still runs; the prediction button just reports the model is unavailable.
+try:
+    from ML_Model import (
+        is_available as ml_is_available,
+        predict_for_edge as ml_predict_for_edge,
+        edge_to_road_id as ml_edge_to_road_id,
+        congestion_label as ml_congestion_label,
+        train_model as ml_train_model,
+        TIME_PERIODS as ML_TIME_PERIODS,
+    )
+    ML_IMPORT_OK = True
+except Exception as _ml_err:  # joblib/sklearn missing or pkl files corrupt
+    ML_IMPORT_OK = False
+    _ML_IMPORT_ERROR = str(_ml_err)
+
+    def ml_is_available():
+        return False
+
+    def ml_predict_for_edge(*_args, **_kwargs):
+        return None
+
+    def ml_edge_to_road_id(*_args, **_kwargs):
+        return None
+
+    def ml_congestion_label(_c):
+        return ""
+
+    def ml_train_model():
+        return {'success': False,
+                'message': f"ML_Model could not be imported: {_ml_err}"}
+
+    ML_TIME_PERIODS = ['Morning', 'Afternoon', 'Evening', 'Night']
 
 class TransportationGUI:
     """Enhanced GUI with manual layout for clearer visualization."""
@@ -136,6 +171,33 @@ class TransportationGUI:
         if v > hi:
             v = hi
         return v
+
+    @staticmethod
+    def _make_readonly(text_widget):
+        """Make a Tk Text/ScrolledText widget read-only for the user.
+
+        Blocks typing, paste, and cut, but keeps mouse selection, scrolling,
+        keyboard navigation (arrows / Home / End / PageUp / PageDown),
+        Ctrl+C (copy), and Ctrl+A (select all). Programmatic ``insert`` and
+        ``delete`` calls from the rest of the GUI keep working unchanged.
+        """
+        nav_keys = {'Left', 'Right', 'Up', 'Down', 'Home', 'End',
+                    'Prior', 'Next',
+                    'Shift_L', 'Shift_R', 'Control_L', 'Control_R',
+                    'Alt_L', 'Alt_R', 'Meta_L', 'Meta_R'}
+
+        def on_key(event):
+            if event.keysym in nav_keys:
+                return None
+            # Allow Ctrl+C (copy) and Ctrl+A (select all); block Ctrl+V/X.
+            if event.state & 0x4 and event.keysym.lower() in ('c', 'a', 'insert'):
+                return None
+            return "break"
+
+        text_widget.bind("<Key>", on_key)
+        text_widget.bind("<<Paste>>", lambda e: "break")
+        text_widget.bind("<<Cut>>", lambda e: "break")
+        text_widget.bind("<<PasteSelection>>", lambda e: "break")
     
     def setup_ui(self):
         """Setup the user interface."""
@@ -185,6 +247,7 @@ class TransportationGUI:
         self.info_text = scrolledtext.ScrolledText(info_frame, height=5, bg='#1a1a2e', fg='#e0e0e0',
                                                    font=('Consolas', 10), insertbackground='white')
         self.info_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self._make_readonly(self.info_text)
         
         # Configure text tags
         self.info_text.tag_configure('success', foreground='#4CAF50')
@@ -284,9 +347,49 @@ class TransportationGUI:
                  bg='#FF9800', fg='white', font=('Helvetica', 10),
                  padx=15, pady=5).pack(side=tk.LEFT, padx=2)
         
-        self.path_result_text = tk.Text(frame, height=10, bg='#1a1a2e', fg='#4CAF50',
+        self.path_result_text = tk.Text(frame, height=8, bg='#1a1a2e', fg='#4CAF50',
                                         font=('Consolas', 9), wrap=tk.WORD)
         self.path_result_text.pack(fill=tk.X, padx=10, pady=5)
+        self._make_readonly(self.path_result_text)
+
+        # ─── ML Traffic Forecast (RandomForest, see ML_Model.py) ───
+        ml_label_frame = tk.Frame(frame, bg='#16213e')
+        ml_label_frame.pack(fill=tk.X, padx=10, pady=(8, 0))
+        tk.Label(ml_label_frame, text="🧠 ML Traffic Forecast",
+                 font=('Helvetica', 10, 'bold'),
+                 bg='#16213e', fg='#CE93D8').pack(side=tk.LEFT)
+
+        ml_loaded = ml_is_available()
+        self.ml_status_label = tk.Label(
+            ml_label_frame,
+            text=("● Model loaded" if ml_loaded else "○ Model unavailable"),
+            font=('Helvetica', 8), bg='#16213e',
+            fg=('#4CAF50' if ml_loaded else '#f44336'),
+        )
+        self.ml_status_label.pack(side=tk.RIGHT)
+
+        ml_btn_frame = tk.Frame(frame, bg='#16213e')
+        ml_btn_frame.pack(fill=tk.X, padx=10, pady=4)
+        self.ml_predict_btn = tk.Button(
+            ml_btn_frame, text="🔮 Predict",
+            command=self.predict_route_congestion,
+            bg='#9C27B0', fg='white', font=('Helvetica', 9, 'bold'),
+            padx=8, pady=3,
+        )
+        self.ml_predict_btn.pack(side=tk.LEFT, padx=2)
+
+        self.ml_retrain_btn = tk.Button(
+            ml_btn_frame, text="🔄 Retrain Model",
+            command=self.retrain_ml_model,
+            bg='#673AB7', fg='white', font=('Helvetica', 9, 'bold'),
+            padx=8, pady=3,
+        )
+        self.ml_retrain_btn.pack(side=tk.LEFT, padx=2)
+
+        self.ml_result_text = tk.Text(frame, height=6, bg='#1a1a2e', fg='#CE93D8',
+                                      font=('Consolas', 9), wrap=tk.WORD)
+        self.ml_result_text.pack(fill=tk.X, padx=10, pady=(4, 5))
+        self._make_readonly(self.ml_result_text)
     
     def setup_network_tab(self, notebook):
         """Setup network design tab."""
@@ -321,6 +424,7 @@ and high-population areas."""
         self.mst_result_text = tk.Text(frame, height=8, bg='#1a1a2e', fg='#FF9800',
                                        font=('Consolas', 9), wrap=tk.WORD)
         self.mst_result_text.pack(fill=tk.X, padx=10, pady=5)
+        self._make_readonly(self.mst_result_text)
     
     def setup_emergency_tab(self, notebook):
         """Setup emergency routing tab."""
@@ -371,6 +475,7 @@ and high-population areas."""
         self.em_result_text = tk.Text(frame, height=10, bg='#1a1a2e', fg='#f44336',
                                       font=('Consolas', 9), wrap=tk.WORD)
         self.em_result_text.pack(fill=tk.X, padx=10, pady=5)
+        self._make_readonly(self.em_result_text)
     
     def setup_transit_tab(self, notebook):
         """Setup public transit tab."""
@@ -404,6 +509,7 @@ and high-population areas."""
         self.transit_result_text = tk.Text(frame, height=6, bg='#1a1a2e', fg='#00BCD4',
                                            font=('Consolas', 9), wrap=tk.WORD)
         self.transit_result_text.pack(fill=tk.X, padx=10, pady=5)
+        self._make_readonly(self.transit_result_text)
 
         # Metro lines display
         tk.Label(frame, text="Metro Lines:", bg='#16213e', fg='white',
@@ -426,6 +532,7 @@ and high-population areas."""
         self.metro_result_text = tk.Text(frame, height=5, bg='#1a1a2e', fg='#CE93D8',
                                          font=('Consolas', 9), wrap=tk.WORD)
         self.metro_result_text.pack(fill=tk.X, padx=10, pady=5)
+        self._make_readonly(self.metro_result_text)
 
         # Traffic signal optimization
         tk.Label(frame, text="Traffic Signal (Greedy):", bg='#16213e', fg='white',
@@ -447,6 +554,7 @@ and high-population areas."""
         self.signal_result_text = tk.Text(frame, height=6, bg='#1a1a2e', fg='#FFEB3B',
                                           font=('Consolas', 9), wrap=tk.WORD)
         self.signal_result_text.pack(fill=tk.X, padx=10, pady=5)
+        self._make_readonly(self.signal_result_text)
     
     def setup_maintenance_tab(self, notebook):
         """Setup maintenance tab."""
@@ -473,6 +581,7 @@ and high-population areas."""
         self.maint_result_text = tk.Text(frame, height=8, bg='#1a1a2e', fg='#FF9800',
                                          font=('Consolas', 9), wrap=tk.WORD)
         self.maint_result_text.pack(fill=tk.X, padx=10, pady=5)
+        self._make_readonly(self.maint_result_text)
     
     def run_emergency_scenario(self, from_id, to_id):
         """Run a predefined emergency scenario."""
@@ -538,7 +647,168 @@ and high-population areas."""
             self.log_info(f"No route between {start} and {end}", 'error')
         
         self.draw_network()
-    
+
+    def predict_route_congestion(self):
+        """Use the ML model (RandomForest) to forecast congestion along the route."""
+        self.ml_result_text.delete(1.0, tk.END)
+
+        if not ML_IMPORT_OK:
+            self.ml_result_text.insert(
+                1.0,
+                "⚠️ ML dependencies not installed.\n\n"
+                "Run:  pip install -r requirements.txt\n"
+                "Then restart the app."
+            )
+            return
+
+        if not ml_is_available():
+            self.ml_result_text.insert(
+                1.0,
+                "⚠️ Trained model not found.\n\n"
+                "Run:  python ML_Model.py\n"
+                "to (re)train and persist the model."
+            )
+            return
+
+        path = self.selected_path
+        if not path or len(path) < 2:
+            self.ml_result_text.insert(
+                1.0,
+                "ℹ️ Find a route first (🔍 Find Route),\n"
+                "then click here to forecast congestion\n"
+                "for each segment."
+            )
+            return
+
+        time_map = {"Morning": 0, "Afternoon": 1, "Evening": 2, "Night": 3}
+        time_period = time_map.get(self.path_time_var.get(), 0)
+        time_label = ML_TIME_PERIODS[time_period]
+
+        lines = [f"🧠 Congestion Forecast — {time_label}\n"]
+        covered = 0
+        skipped = 0
+        c_values = []
+
+        for i in range(len(path) - 1):
+            a, b = path[i], path[i + 1]
+            edge = self.graph.get_edge(a, b)
+            if edge is None:
+                continue
+
+            road_id = ml_edge_to_road_id(a, b)
+            if road_id is None:
+                lines.append(f"  • {a} → {b}: (no training data)")
+                skipped += 1
+                continue
+
+            c = ml_predict_for_edge(edge, time_period)
+            if c is None:
+                lines.append(f"  • {a} → {b}: prediction failed")
+                skipped += 1
+                continue
+
+            label = ml_congestion_label(c)
+            lines.append(f"  • {road_id}\n      C = {c:.2f}  ({label})")
+            covered += 1
+            c_values.append(c)
+
+        if covered:
+            avg = sum(c_values) / len(c_values)
+            lines.append(f"\n📊 Avg C across {covered} known segment"
+                         f"{'s' if covered != 1 else ''}: {avg:.2f}"
+                         f" ({ml_congestion_label(avg)})")
+        if skipped:
+            lines.append(f"   {skipped} segment{'s' if skipped != 1 else ''} "
+                         f"outside training set")
+
+        self.ml_result_text.insert(1.0, "\n".join(lines))
+        self.log_info(
+            f"ML forecast: {covered} segment(s) predicted, {skipped} skipped",
+            'info' if covered else 'warning'
+        )
+
+    def retrain_ml_model(self):
+        """(Re)train the Random Forest model in a background thread."""
+        if not ML_IMPORT_OK:
+            self.ml_result_text.delete(1.0, tk.END)
+            self.ml_result_text.insert(
+                1.0,
+                "⚠️ ML dependencies not installed.\n\n"
+                "Run:  pip install -r requirements.txt\n"
+                "Then restart the app."
+            )
+            return
+
+        # Disable both ML buttons while training is in flight
+        self.ml_predict_btn.config(state='disabled')
+        self.ml_retrain_btn.config(state='disabled', text="⏳ Training...")
+        self.ml_status_label.config(text="◐ Training...", fg='#FFC107')
+        self.ml_result_text.delete(1.0, tk.END)
+        self.ml_result_text.insert(
+            1.0,
+            "🔄 Training Random Forest model...\n\n"
+            "  • Loading augmented_traffic_data.csv\n"
+            "  • Fitting 100 estimators\n"
+            "  • Evaluating on 20% holdout\n"
+            "  • Saving traffic_model.pkl + encoders\n\n"
+            "Please wait..."
+        )
+        self.log_info("ML model retraining started", 'info')
+
+        def worker():
+            try:
+                result = ml_train_model()
+            except Exception as e:  # safety net
+                result = {'success': False, 'message': f"Training crashed: {e}"}
+            # Schedule the UI update back on the Tk main thread
+            self.root.after(0, lambda: self._on_retrain_done(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_retrain_done(self, result):
+        """Run on the main thread once :meth:`retrain_ml_model`'s worker finishes."""
+        # Re-enable buttons regardless of outcome
+        self.ml_predict_btn.config(state='normal')
+        self.ml_retrain_btn.config(state='normal', text="🔄 Retrain Model")
+
+        self.ml_result_text.delete(1.0, tk.END)
+
+        if result.get('success'):
+            text = "✅ Training Complete\n\n"
+            text += f"📊 Performance (20% holdout):\n"
+            text += f"   MSE: {result['mse']:.4f}\n"
+            text += f"   R²:  {result['r2']:.4f}\n"
+            samples = result.get('samples')
+            roads = result.get('roads')
+            if samples is not None:
+                roads_part = f" across {roads} roads" if roads else ""
+                text += f"\n📁 Trained on {samples} samples{roads_part}\n"
+            text += "\n💾 Saved:\n"
+            text += "   • traffic_model.pkl\n"
+            text += "   • road_encoder.pkl\n"
+            text += "   • time_encoder.pkl"
+            self.ml_result_text.insert(1.0, text)
+
+            self.ml_status_label.config(text="● Model loaded", fg='#4CAF50')
+            self.log_info(
+                f"ML retrained: MSE={result['mse']:.3f}, R²={result['r2']:.3f}",
+                'success'
+            )
+            self.status_var.set(
+                f"ML retrained | MSE: {result['mse']:.3f} | "
+                f"R²: {result['r2']:.3f}"
+            )
+        else:
+            msg = result.get('message', 'Unknown error')
+            self.ml_result_text.insert(1.0, f"❌ Training Failed\n\n{msg}")
+            # Keep prior status (model may still be loaded from disk)
+            current = ml_is_available()
+            self.ml_status_label.config(
+                text=("● Model loaded" if current else "○ Model unavailable"),
+                fg=('#4CAF50' if current else '#f44336'),
+            )
+            self.log_info(f"ML retrain failed: {msg}", 'error')
+
     def generate_mst(self):
         """Generate MST network."""
         prioritize = self.mst_prioritize_var.get()
