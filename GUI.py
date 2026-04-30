@@ -42,6 +42,7 @@ class TransportationGUI:
         self.selected_path = []
         self.mst_edges = []
         self.emergency_path = []
+        self.metro_path = []  # ordered list of station node ids for the active metro line
 
         # Zoom & pan state (applied in get_canvas_pos)
         self.zoom = 1.0
@@ -155,7 +156,9 @@ class TransportationGUI:
         style = ttk.Style()
         style.theme_use('clam')
         style.configure('TNotebook', background='#16213e', borderwidth=0)
-        style.configure('TNotebook.Tab', background='#0f3460', foreground='white', padding=[10, 5])
+        # Tighter padding + smaller font so all 5 tab labels fit inside the 380 px panel
+        style.configure('TNotebook.Tab', background='#0f3460', foreground='white',
+                        padding=[4, 4], font=('Helvetica', 8))
         style.map('TNotebook.Tab', background=[('selected', '#e94560')])
         
         notebook = ttk.Notebook(control_panel)
@@ -231,7 +234,7 @@ class TransportationGUI:
     def setup_path_tab(self, notebook):
         """Setup route planning tab."""
         frame = tk.Frame(notebook, bg='#16213e')
-        notebook.add(frame, text="🛣️ Route Planning")
+        notebook.add(frame, text="🛣️ Route")
         
         tk.Label(frame, text="Find Shortest Path", font=('Helvetica', 11, 'bold'),
                 bg='#16213e', fg='#4CAF50').pack(pady=5)
@@ -288,7 +291,7 @@ class TransportationGUI:
     def setup_network_tab(self, notebook):
         """Setup network design tab."""
         frame = tk.Frame(notebook, bg='#16213e')
-        notebook.add(frame, text="🌐 Network Design")
+        notebook.add(frame, text="🌐 Network")
         
         tk.Label(frame, text="MST Network Optimization", font=('Helvetica', 11, 'bold'),
                 bg='#16213e', fg='#FF9800').pack(pady=5)
@@ -401,7 +404,29 @@ and high-population areas."""
         self.transit_result_text = tk.Text(frame, height=6, bg='#1a1a2e', fg='#00BCD4',
                                            font=('Consolas', 9), wrap=tk.WORD)
         self.transit_result_text.pack(fill=tk.X, padx=10, pady=5)
-        
+
+        # Metro lines display
+        tk.Label(frame, text="Metro Lines:", bg='#16213e', fg='white',
+                font=('Helvetica', 10)).pack(anchor='w', padx=10, pady=(8, 0))
+
+        metro_frame = tk.Frame(frame, bg='#16213e')
+        metro_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(metro_frame, text="Line:", bg='#16213e', fg='#aaa').grid(row=0, column=0)
+        metro_keys = list(self.graph.metro_lines.keys())
+        self.metro_var = tk.StringVar(value=metro_keys[0] if metro_keys else "")
+        metro_combo = ttk.Combobox(metro_frame, textvariable=self.metro_var, width=8)
+        metro_combo['values'] = metro_keys
+        metro_combo.grid(row=0, column=1, padx=5)
+
+        tk.Button(metro_frame, text="🚇 Show Line", command=self.show_metro_line,
+                 bg='#9C27B0', fg='white', font=('Helvetica', 9, 'bold'),
+                 padx=10, pady=2).grid(row=0, column=2, padx=5)
+
+        self.metro_result_text = tk.Text(frame, height=5, bg='#1a1a2e', fg='#CE93D8',
+                                         font=('Consolas', 9), wrap=tk.WORD)
+        self.metro_result_text.pack(fill=tk.X, padx=10, pady=5)
+
         # Traffic signal optimization
         tk.Label(frame, text="Traffic Signal (Greedy):", bg='#16213e', fg='white',
                 font=('Helvetica', 10)).pack(anchor='w', padx=10, pady=(10,0))
@@ -611,19 +636,23 @@ and high-population areas."""
         self.selected_path = []
         self.emergency_path = []
         self.mst_edges = []
+        self.metro_path = []
         self.path_result_text.delete(1.0, tk.END)
         self.path_result_text.insert(1.0, "🗺️ Showing all roads in network")
         self.log_info("Displaying all roads", 'info')
         self.status_var.set(f"All roads | Nodes: {len(self.graph.nodes)} | Roads: {len(self.graph.edges)}")
         self.draw_network()
-    
+
     def clear_paths(self):
         """Clear all highlights."""
         self.selected_path = []
         self.emergency_path = []
         self.mst_edges = []
+        self.metro_path = []
         self.path_result_text.delete(1.0, tk.END)
         self.path_result_text.insert(1.0, "Paths cleared")
+        if hasattr(self, 'metro_result_text'):
+            self.metro_result_text.delete(1.0, tk.END)
         self.log_info("Paths cleared", 'info')
         self.draw_network()
     
@@ -631,12 +660,17 @@ and high-population areas."""
         """Optimize bus schedule using DP."""
         route_id = self.bus_route_var.get()
         buses = self.bus_count_var.get()
-        
+
         result = dynamic_programming_bus_scheduling(self.graph, route_id, buses)
-        
+
         self.transit_result_text.delete(1.0, tk.END)
-        
+
         if result:
+            # Pull static route metadata stored in graph.bus_routes
+            meta = self.graph.bus_routes.get(route_id, {})
+            existing_fleet = meta.get('buses')
+            daily_passengers = meta.get('daily_passengers')
+
             text = f"🚌 Route {route_id} Optimization\n\n"
             text += f"📍 Stops:\n"
             for stop_id in result['stops']:
@@ -644,17 +678,58 @@ and high-population areas."""
                 pop = result['population_per_stop'].get(stop_id, 0)
                 if node:
                     text += f"   • {node.name} ({stop_id}): {pop:,} pop.\n"
-            
+
             text += f"\n📊 Results:\n"
+            if existing_fleet is not None:
+                text += f"   Current Fleet: {existing_fleet} buses\n"
             text += f"   Available Buses: {buses}\n"
             text += f"   Max Coverage: {result['max_coverage']:,}\n"
             text += f"   Total Population: {result['total_population']:,}\n"
             if result['total_population'] > 0:
                 text += f"   Coverage Rate: {result['max_coverage']/result['total_population']*100:.1f}%\n"
-            
+            if daily_passengers is not None:
+                text += f"   Daily Ridership: {daily_passengers:,}\n"
+
             self.transit_result_text.insert(1.0, text)
             self.log_info(f"Bus {route_id}: Coverage {result['max_coverage']:,} with {buses} buses", 'success')
-    
+
+    def show_metro_line(self):
+        """Highlight the selected metro line on the canvas and display its details."""
+        line_id = self.metro_var.get()
+        self.metro_result_text.delete(1.0, tk.END)
+
+        if not line_id or line_id not in self.graph.metro_lines:
+            self.metro_result_text.insert(1.0, "⚠️ Please select a metro line.")
+            return
+
+        line = self.graph.metro_lines[line_id]
+        stations = line.get('stations', [])
+
+        # Use metro as the active highlight; clear other overlays
+        self.metro_path = stations
+        self.selected_path = []
+        self.emergency_path = []
+        self.mst_edges = []
+
+        text = f"🚇 {line.get('name', line_id)}\n\n"
+        text += f"📍 Stations ({len(stations)}):\n"
+        for st_id in stations:
+            node = self.graph.nodes.get(st_id)
+            if node:
+                text += f"   • {node.name} ({st_id})\n"
+            else:
+                text += f"   • Unknown ({st_id})\n"
+
+        daily = line.get('daily_passengers')
+        if daily is not None:
+            text += f"\n👥 Daily Passengers: {daily:,}"
+
+        self.metro_result_text.insert(1.0, text)
+        self.log_info(f"Metro {line_id}: {line.get('name', '')}", 'info')
+        self.status_var.set(f"Metro: {line_id} | Stations: {len(stations)}"
+                            + (f" | Riders: {daily:,}" if daily is not None else ""))
+        self.draw_network()
+
     def optimize_maintenance(self):
         """Optimize maintenance using DP."""
         budget = self.budget_var.get()
@@ -860,7 +935,19 @@ and high-population areas."""
                 self.canvas.create_text(mid_x, mid_y, text=label,
                                        fill='#aaa' if not is_highlighted else 'white',
                                        font=('Arial', 7, 'bold' if is_highlighted else 'normal'))
-        
+
+        # Draw metro line overlay (metros run on dedicated tracks, drawn over the road graph)
+        if self.metro_path and len(self.metro_path) >= 2:
+            metro_color = '#9C27B0'
+            metro_width = self._scale(5, lo=2, hi=12)
+            for i in range(len(self.metro_path) - 1):
+                a, b = self.metro_path[i], self.metro_path[i + 1]
+                if a in self.graph.nodes and b in self.graph.nodes:
+                    x1, y1 = self.get_canvas_pos(a)
+                    x2, y2 = self.get_canvas_pos(b)
+                    self.canvas.create_line(x1, y1, x2, y2, fill=metro_color,
+                                           width=metro_width, dash=(2, 4))
+
         # Draw nodes
         for node_id, node in self.graph.nodes.items():
             x, y = self.get_canvas_pos(node_id)
@@ -876,7 +963,7 @@ and high-population areas."""
                 base_radius = 13
             radius = self._scale(base_radius, lo=4, hi=40)
 
-            is_in_path = node_id in (self.selected_path or self.emergency_path or [])
+            is_in_path = node_id in (self.selected_path or self.emergency_path or self.metro_path or [])
             is_start = ((self.selected_path and node_id == self.selected_path[0]) or 
                        (self.emergency_path and node_id == self.emergency_path[0]))
             is_end = ((self.selected_path and node_id == self.selected_path[-1]) or 
@@ -927,46 +1014,67 @@ and high-population areas."""
         self.draw_view_hud(canvas_w, canvas_h)
     
     def draw_legend(self, canvas_w, canvas_h):
-        """Draw legend in corner."""
+        """Draw legend anchored bottom-left, sized dynamically to fit every entry."""
         legend_x = 15
-        legend_y = canvas_h - 230
-        
-        # Background
-        self.canvas.create_rectangle(legend_x - 5, legend_y - 25, legend_x + 155, legend_y + 225,
-                                    fill='#16213e', outline='#333')
-        
-        self.canvas.create_text(legend_x + 70, legend_y - 12, text="📋 Legend",
-                               fill='white', font=('Arial', 10, 'bold'))
-        
-        y_offset = 10
-        for type_name, color in sorted(self.type_colors.items()):
-            if y_offset > 190:
-                break
-            self.canvas.create_oval(legend_x + 5, legend_y + y_offset,
-                                   legend_x + 18, legend_y + y_offset + 12,
-                                   fill=color, outline='white', width=1)
-            self.canvas.create_text(legend_x + 25, legend_y + y_offset + 6,
-                                   text=type_name, fill='white',
-                                   font=('Arial', 7), anchor=tk.W)
-            y_offset += 20
-        
-        # Line styles
-        y_offset += 10
-        lines = [
+        legend_w = 160
+        pad_top = 6
+        pad_bottom = 8
+        title_h = 22
+        section_gap = 6
+
+        type_entries = sorted(self.type_colors.items())
+        line_entries = [
             ('#4CAF50', 3, None, 'Shortest Path'),
             ('#FF1744', 3, (6, 4), 'Emergency Route'),
             ('#FF9800', 3, None, 'MST Network'),
+            ('#9C27B0', 3, (3, 4), 'Metro Line'),
             ('#444466', 1, (4, 4), 'Proposed Road'),
         ]
-        
-        for color, width, dash, label in lines:
-            self.canvas.create_line(legend_x + 2, legend_y + y_offset + 6,
-                                   legend_x + 18, legend_y + y_offset + 6,
-                                   fill=color, width=width, dash=dash)
-            self.canvas.create_text(legend_x + 25, legend_y + y_offset + 6,
-                                   text=label, fill='white',
-                                   font=('Arial', 7), anchor=tk.W)
-            y_offset += 20
+
+        # Pick a row height that lets the whole legend fit above the canvas bottom.
+        # 60 px reserved at the top keeps the canvas title clear.
+        max_h = max(120, canvas_h - 70)
+        total_rows = len(type_entries) + len(line_entries)
+        fixed = pad_top + title_h + section_gap + pad_bottom
+        ideal_row_h = 16
+        row_h = ideal_row_h
+        if fixed + total_rows * row_h > max_h:
+            row_h = max(11, (max_h - fixed) // max(1, total_rows))
+
+        content_h = fixed + total_rows * row_h
+        legend_y = max(55, canvas_h - content_h - 10)
+
+        # Background
+        self.canvas.create_rectangle(legend_x - 5, legend_y,
+                                     legend_x + legend_w, legend_y + content_h,
+                                     fill='#16213e', outline='#333')
+
+        # Header
+        self.canvas.create_text(legend_x + legend_w // 2 - 3, legend_y + pad_top + 8,
+                                text="📋 Legend", fill='white',
+                                font=('Arial', 10, 'bold'))
+
+        # Type swatches
+        y = legend_y + pad_top + title_h
+        for type_name, color in type_entries:
+            self.canvas.create_oval(legend_x + 5, y,
+                                    legend_x + 18, y + min(12, row_h - 2),
+                                    fill=color, outline='white', width=1)
+            self.canvas.create_text(legend_x + 25, y + 6,
+                                    text=type_name, fill='white',
+                                    font=('Arial', 7), anchor=tk.W)
+            y += row_h
+
+        # Line styles
+        y += section_gap
+        for color, width, dash, label in line_entries:
+            self.canvas.create_line(legend_x + 2, y + 6,
+                                    legend_x + 18, y + 6,
+                                    fill=color, width=width, dash=dash)
+            self.canvas.create_text(legend_x + 25, y + 6,
+                                    text=label, fill='white',
+                                    font=('Arial', 7), anchor=tk.W)
+            y += row_h
     
     def draw_view_hud(self, canvas_w, canvas_h):
         """Show zoom level and a small controls hint in the top-right corner."""
